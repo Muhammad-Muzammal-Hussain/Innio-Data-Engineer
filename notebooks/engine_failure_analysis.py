@@ -124,7 +124,7 @@ for col_name in df.columns:
     df = df.withColumn(col_name,F.trim(F.col(col_name)))
 # step 2: here in this we change the empty space with the null because dropna() only catches the null values, not emppty strings ""
 for col_name in df.columns:
-    df = df.withColumn(
+    df.withColumn(
         col_name,
         F.when(F.col(col_name)=="",None).otherwise(F.col(col_name))
     )
@@ -137,3 +137,121 @@ before = df.count()
 df = df.dropna()
 after = df.count()
 print(f"completeness: removed {before - after} rows and then after {after} rows remained")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Silver Step 5 — Type Casting
+# MAGIC
+# MAGIC Every column arrived as a string from Bronze.
+# MAGIC We now cast each column to its correct type.
+# MAGIC
+# MAGIC We use try_cast instead of direct cast for a critical reason:
+# MAGIC direct cast crashes the entire pipeline if it finds one bad value.
+# MAGIC try_cast returns null for invalid values like "kkkkk" or "999abc"
+# MAGIC and the pipeline continues. The dropna after removes those null rows.
+# MAGIC
+# MAGIC Numeric columns and their expected types:
+# MAGIC - oph, pist_m, past_dmg, resting_analysis_results : integer
+# MAGIC - rpm_max, full_load_issues, number_up, number_tc  : integer
+# MAGIC - op_set_1, op_set_3, high_breakdown_risk          : integer
+# MAGIC - bmep, ng_imp                                     : double (decimal)
+
+# COMMAND ----------
+
+int_cols = ["oph", "pist_m", "past_dmg", "resting_analysis_results",
+    "rpm_max", "full_load_issues", "number_up", "number_tc",
+    "op_set_1", "op_set_3", "high_breakdown_risk"
+]
+double_cols = ["bmep", "ng_imp"]
+# try_cast returns null for bad values instead of crashing like in pandas coerce 
+for c in int_cols:
+  df = df.withColumn(c,F.expr(f"try_cast(`{c}` as  INT)"))
+for c in double_cols:
+  df = df.withColumn(c,F.expr(f"try_cast(`{c}` as DOUBLE)"))
+before = df.count()
+df = df.dropna(subset=int_cols + double_cols)
+after = df.count()
+print(f"dropped {before - after} rows and {after} rows remained")
+
+  
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Silver Step 6 — Value Validity Checks
+# MAGIC
+# MAGIC Even after type casting, some values may be technically valid numbers
+# MAGIC but not in the allowed set defined by the business description.
+# MAGIC
+# MAGIC We check three columns:
+# MAGIC - issue_type must be one of 4 categories defined in business_description.txt
+# MAGIC - past_dmg must be 0 or 1 only — it is a boolean flag
+# MAGIC - resting_analysis_results must be 0, 1, or 2 only
+# MAGIC
+# MAGIC Rows with values outside these sets are invalid records.
+# MAGIC They are removed from Silver and will never reach Gold.
+
+# COMMAND ----------
+
+valid_issue_types = ["typical", "atypical", "non-related", "non-symptomatic"]
+before = df.count()
+
+df = df.filter(F.col("issue_type").isin(valid_issue_types))
+# past_dmg is a boolean flag — only 0 or 1 allowed
+df = df.filter(F.col("past_dmg").isin([0,1]))
+
+df = df.filter(F.col("resting_analysis_results").isin([0,1,2]))
+after = df.count()
+print(f"dropped {before - after} rows and {after} rows remained")
+#))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Silver Step 7 — Column Renaming
+# MAGIC
+# MAGIC All abbreviated column names are expanded to full descriptive names.
+# MAGIC This makes the Gold layer self-documenting — an analyst reading the
+# MAGIC table 6 months from now understands every column without a dictionary.
+# MAGIC
+# MAGIC Examples:
+# MAGIC - oph      → operating_hours
+# MAGIC - pist_m   → piston_material  
+# MAGIC - bmep     → brake_mean_effective_pressure
+# MAGIC - ng_imp   → natural_gas_impurities_nmol
+# MAGIC - past_dmg → has_past_damage
+
+# COMMAND ----------
+
+column_rename_map = {
+    "oph"                      : "operating_hours",
+    "pist_m"                   : "piston_material",
+    "issue_type"               : "combustion_issue_type",
+    "bmep"                     : "brake_mean_effective_pressure",
+    "ng_imp"                   : "natural_gas_impurities_nmol",
+    "past_dmg"                 : "has_past_damage",
+    "resting_analysis_results" : "resting_analysis_result",
+    "rpm_max"                  : "max_rotations_per_minute",
+    "full_load_issues"         : "has_full_load_issues",
+    "number_up"                : "unplanned_events_count",
+    "number_tc"                : "turbocharger_count",
+    "op_set_1"                 : "operational_setting_1",
+    "op_set_3"                 : "operational_setting_3",
+    "high_breakdown_risk"      : "high_breakdown_risk",
+}
+
+for old, new in column_rename_map.items():
+  df= df.withColumnRenamed(old,new)
+
+# save silver as delta table
+(
+  df.write.format("delta").mode("overwrite").option("overwriteSchema","true")
+  .saveAsTable(SILVER_TABLE)
+)
+
+print("Silver Complete")
+print(f"rows : {df.count()}")
+print(f"columns : {len(df.columns)}")
+print(f"columns : {df.columns}")
+df.printSchema()
